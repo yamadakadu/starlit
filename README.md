@@ -28,13 +28,37 @@ A instalação e implementação do cluster será feita em algumas etapas:
 
 7. Preparação do cluster
 
-## Descrição de cada etapa
+O trabalho está dividido em duas partes:
+
+- **[Parte 1: implementação inicial com uma placa](#parte-1-implementação-inicial-com-uma-placa)** (etapas 1 a 5): montar o servidor e instalar o SO via rede em **uma** placa, validando cada passo.
+- **[Parte 2: três placas](#parte-2-três-placas)** (etapas 6 e 7): instalar três placas ao mesmo tempo, registrar MAC/IP/hostname e preparar o cluster de teste.
+
+## Estrutura do repositório
+
+Os scripts rodam **no servidor** (por enquanto, uma das UP Boards), com `sudo`, e leem as configurações de [config.env](config.env) (IP do servidor, interface de rede, usuário, chave SSH, versões).
+
+| Pasta | Etapa | Script | O que faz |
+|---|---|---|---|
+| `imagem/` | 2 | `preparar-imagem.sh` | baixa, ajusta, comprime e publica a imagem do Ubuntu |
+| `imagem/` | 2 | `publicar-cloud-init.sh` | gera e publica o `user-data` e o `meta-data` |
+| `servidor/` | 3 | `configurar-servidor.sh` | instala e configura o dnsmasq e o nginx |
+| `ipxe/` | 4 | `preparar-ipxe.sh` | compila o iPXE, baixa o Alpine e gera o `boot.ipxe` |
+| `alpine/` | 5 | `empacotar-apkovl.sh` | empacota o script de gravação que roda no Alpine |
+
+Os arquivos `*.tpl` são modelos: os scripts substituem neles as variáveis do `config.env`. Nenhum script apaga uma placa já instalada; a reinstalação é sempre manual (etapa 5).
+
+---
+
+## Parte 1: implementação inicial com uma placa
+
+Nesta parte são usadas duas UP Boards: uma como **servidor** e uma como **placa de teste**, que recebe o SO via rede. A placa de teste deve ter monitor e teclado, para acompanhar cada passo.
 
 ### 1. Preparação da infraestrutura
 
 - Roteador e switch
 
 Para esses dispositivos, basta resetá-los e configurá-los na mesma rede privada. Por enquanto, não foi feita nenhuma segmentação de rede (VLANs).
+O servidor e as placas devem ser ligados ao **switch** (portas gigabit), e não às portas do roteador (100 Mbps).
 
 - UpBoards
 
@@ -52,6 +76,8 @@ Se o servidor com dnsmasq não estiver configurado ou não estiver configurado c
 - **sem SO na eMMC**, ela vai direto para a tela da BIOS e não tenta a rede de novo sozinha: é preciso reiniciá-la.
 
 Por isso, é importante que nessas plaquinhas não tenha nenhum SO instalado previamente.
+
+A placa que será o **servidor** não usa o boot pela rede: ela é instalada à mão (etapa 3) e inicia pela eMMC.
 
 **Remoção do Ubuntu antigo**
 
@@ -79,86 +105,73 @@ A plaquinha precisa de uma fonte de ()W e tem suporte para até 4 entradas USB-A
 
 **Abordagem:** usar a *cloud image* oficial do **Ubuntu Server 24.04 LTS** (`noble-server-cloudimg-amd64.img`, ~600 MB), que já vem com o sistema instalado e com o cloud-init. Em vez de rodar um instalador, a imagem é gravada direto na eMMC (etapa 5) e o cloud-init faz a configuração no primeiro boot. Isso evita carregar a ISO de instalação (~3 GB) na RAM das placas (4 GB).
 
-**Preparação da imagem** (feita uma vez, no servidor):
+**Scripts** (no servidor, depois da etapa 3):
 
-1. Baixar `noble-server-cloudimg-amd64.img` e conferir o SHA256 com o arquivo `SHA256SUMS` publicado junto com ela.
-2. Converter de qcow2 para raw, o formato que pode ser gravado direto no disco: `qemu-img convert -O raw noble-server-cloudimg-amd64.img noble.raw`.
-3. Apontar o cloud-init para o servidor HTTP: montar a partição raiz da imagem (`losetup -Pf --show noble.raw` e montar a partição 1) e criar o arquivo `/etc/cloud/cloud.cfg.d/99-nocloud.cfg`:
-   ```yaml
-   datasource_list: [ NoCloud, None ]
-   datasource:
-     NoCloud:
-       seedfrom: http://<servidor>/cloud-init/
-   ```
-4. Na mesma partição, criar o arquivo de marca `/etc/starlit-release` com a versão da imagem (ex.: `noble-1`). A etapa 5 usa esse arquivo para saber se a imagem já está instalada.
-5. Desmontar (`umount` e `losetup -d`), comprimir com `gzip -k noble.raw` e publicar o `noble.raw.gz` no servidor HTTP (etapa 3). A maior parte dos ~3,5 GB da imagem é espaço vazio, então o arquivo comprimido fica bem menor, o que reduz o tempo de transferência quando várias placas são instaladas ao mesmo tempo. A descompressão é feita na própria placa, durante a gravação (etapa 5).
+```sh
+sudo imagem/preparar-imagem.sh      # imagem: noble.raw.gz
+sudo imagem/publicar-cloud-init.sh  # user-data e meta-data
+```
 
-**Arquivos do cloud-init** (servidos em `http://<servidor>/cloud-init/`, editáveis sem regerar a imagem):
+O que o `preparar-imagem.sh` faz (arquivos intermediários em `/var/tmp/starlit/`):
+
+1. Baixa `noble-server-cloudimg-amd64.img` e confere o SHA256 com o `SHA256SUMS` publicado junto.
+2. Converte de qcow2 para raw, o formato que pode ser gravado direto no disco.
+3. Confere que a partição 15 é a partição EFI e tem o `EFI/ubuntu/shimx64.efi` (o script da etapa 5 depende disso).
+4. Na partição raiz (1), cria `/etc/cloud/cloud.cfg.d/99-starlit-nocloud.cfg`, que aponta o cloud-init para `http://<servidor>/cloud-init/`, e o arquivo de marca `/etc/starlit-release` com a versão da imagem (`IMAGEM_VERSAO` no `config.env`). A etapa 5 usa a marca para saber se a imagem já está instalada.
+5. Comprime com gzip e publica `noble.raw.gz` no servidor HTTP. A maior parte dos ~3,5 GB da imagem é espaço vazio, então o arquivo comprimido fica bem menor; a descompressão é feita na própria placa, durante a gravação.
+
+**Arquivos do cloud-init** (servidos em `http://<servidor>/cloud-init/`). O modelo é [imagem/user-data.tpl](imagem/user-data.tpl); para mudar a configuração, editar o modelo e rodar de novo o `publicar-cloud-init.sh`, sem regerar a imagem.
 
 - `meta-data`: vazio por enquanto (o hostname é definido na etapa 6).
-- `user-data`: começa com `#cloud-config` e contém:
-  - `users`: usuário com `sudo` e a chave SSH pública;
+- `user-data`:
+  - `users`: usuário `ubuntu` com `sudo` sem senha e a chave SSH `~/.ssh/cluster-key.pub`; o usuário não tem senha, o acesso é só pela chave;
   - `ssh_pwauth: false`: login só por chave;
-  - `packages`: só o básico (ex.: `curl`); o que o Kubernetes precisa fica para a etapa 7;
+  - `packages`: só o básico (`curl`); o que o Kubernetes precisa fica para a etapa 7;
   - `preserve_hostname: true`: impede o cloud-init de desfazer, a cada boot, o hostname definido na etapa 6;
-  - `phone_home`: no fim do primeiro boot, a placa avisa o servidor que a instalação terminou. O aviso fica registrado no log do nginx com o IP da placa (usado na verificação da etapa 6):
-    ```yaml
-    phone_home:
-      url: http://<servidor>/phone-home/
-      post: [hostname, instance_id]
-      tries: 10
-    ```
+  - `phone_home`: no fim do primeiro boot, a placa avisa o servidor que a instalação terminou. O aviso fica registrado em `/var/log/nginx/phone-home.log`, com o IP da placa.
 
 A cloud image não tem swap (exigência do Kubernetes) e a partição raiz cresce sozinha até ocupar a eMMC inteira no primeiro boot.
 
-**Teste:** validar o `user-data` com `cloud-init schema -c user-data` e iniciar `noble.raw` numa VM (QEMU/KVM, com UEFI) antes de usar nas placas.
-
 ### 3. Preparação da máquina com dnsmasq e servidor http
 
-**Abordagem:** uma máquina separada (de início um notebook ligado ao switch), com Ubuntu ou Debian, roda três serviços:
+**Abordagem:** uma das UP Boards é o servidor, com IP `192.168.0.160` (recebido pelo DHCP do roteador), e roda três serviços:
 
 | Serviço | Função | Porta |
 |---|---|---|
 | dnsmasq (proxy DHCP) | informa às placas de onde baixar o bootloader; os IPs continuam sendo distribuídos pelo roteador | UDP 67 e 4011 |
 | dnsmasq (TFTP) | entrega o bootloader (arquivo pequeno, primeiro passo do boot) | UDP 69 |
-| nginx (HTTP) | entrega todo o resto: kernel, initrd, `noble.raw.gz`, arquivos do cloud-init | TCP 80 |
+| nginx (HTTP) | entrega todo o resto: kernel, initrd, `noble.raw.gz`, arquivos do cloud-init; recebe os avisos do `phone_home` | TCP 80 |
 
-**Procedimento:**
+**Instalação do servidor** (à mão, uma vez):
 
-1. Dar ao servidor um IP fixo: reservá-lo no roteador ou escolher um IP fora da faixa de DHCP do roteador.
-2. Instalar os pacotes: `sudo apt install dnsmasq nginx`.
-3. Criar as pastas:
-   - `/srv/tftp/`: bootloader (etapa 4);
-   - `/srv/http/`: `noble.raw.gz`, `cloud-init/user-data`, `cloud-init/meta-data` e os arquivos do boot (etapas 4 e 5).
-4. Configurar o dnsmasq em `/etc/dnsmasq.d/pxe.conf`:
+1. Instalar o **Ubuntu Server 24.04** na placa por pendrive (ISO oficial gravada no pendrive). Na tela de rede do instalador, deixar a configuração automática (DHCP): o roteador atribui `192.168.0.160`. Criar o usuário `ubuntu` e marcar a instalação do OpenSSH.
+
+   **O IP do servidor não pode mudar:** ele fica gravado no iPXE (etapa 4) e na imagem das placas (etapa 2). Se o roteador entregar outro IP ao servidor, as placas deixam de encontrá-lo, e seria preciso ajustar o `config.env` e rodar os scripts de novo. Por isso, reservar `192.168.0.160` para o MAC do servidor no roteador (mesmo procedimento da etapa 6). *Confirmar se o roteador permite a reserva; se não permitir, configurar um IP fixo no servidor, fora da faixa de DHCP do roteador.*
+2. Na BIOS dessa placa, deixar a eMMC em primeiro lugar na ordem de boot.
+3. Copiar o repositório e a chave pública para o servidor, a partir do computador onde eles estão:
+   ```sh
+   scp -r starlit ubuntu@192.168.0.160:
+   scp ~/.ssh/cluster-key.pub ubuntu@192.168.0.160:.ssh/
    ```
-   port=0                                   # desliga o DNS do dnsmasq (evita conflito com o systemd-resolved)
-   interface=<interface de rede>
-   dhcp-range=<endereço da rede>,proxy      # ex.: 192.168.0.0,proxy
-   enable-tftp
-   tftp-root=/srv/tftp
-   pxe-service=x86-64_EFI,"Starlit",ipxe.efi
-   log-dhcp
-   ```
-5. Configurar o nginx para servir `/srv/http/` (apontar `root` do site padrão para essa pasta) e para receber os avisos do `phone_home` (etapa 2), acrescentando ao mesmo site:
-   ```nginx
-   location /phone-home/ {
-       access_log /var/log/nginx/phone-home.log;
-       return 200;
-   }
-   ```
-   Sem isso, o nginx recusaria o aviso (ele não aceita POST em arquivos estáticos) e o cloud-init tentaria de novo várias vezes.
-6. Liberar as portas no firewall, se houver: `sudo ufw allow 67,69,4011/udp` e `sudo ufw allow 80/tcp`.
-7. Reiniciar os serviços: `sudo systemctl restart dnsmasq nginx`.
+4. No servidor, conferir o nome da interface de rede (`ip -br link`) e ajustar `INTERFACE` no `config.env`.
+
+**Script:**
+
+```sh
+cd ~/starlit
+sudo servidor/configurar-servidor.sh
+```
+
+Ele confere que a interface tem o IP `192.168.0.160`, instala o dnsmasq e o nginx, gera as configurações a partir de [servidor/dnsmasq-pxe.conf.tpl](servidor/dnsmasq-pxe.conf.tpl) e [servidor/nginx-starlit.conf.tpl](servidor/nginx-starlit.conf.tpl), cria `/srv/tftp/` e `/srv/http/`, libera as portas no firewall (se o `ufw` estiver ativo) e reinicia os serviços. O DNS do dnsmasq fica desligado (`port=0`), para não conflitar com o `systemd-resolved`.
 
 **Teste:**
 
-- HTTP: `curl http://<servidor>/cloud-init/user-data` a partir de outra máquina.
-- Boot: acompanhar `journalctl -u dnsmasq -f` e ligar uma placa. Devem aparecer a requisição PXE (com o MAC da placa) e o envio do bootloader por TFTP.
+- HTTP: `curl http://192.168.0.160/` a partir de outra máquina deve listar os arquivos publicados.
+- Boot: acompanhar `journalctl -u dnsmasq -f` e ligar a placa de teste. Devem aparecer a requisição PXE (com o MAC da placa) e o envio do bootloader por TFTP.
 
 ### 4. Preparação do bootloader
 
-**Abordagem:** usar o **iPXE** como bootloader. A BIOS baixa o iPXE por TFTP, e ele baixa todo o resto por HTTP. O que ele inicia é um **Alpine Linux** carregado na RAM (~100 MB), que na etapa 5 grava a `noble.raw` na eMMC.
+**Abordagem:** usar o **iPXE** como bootloader. A BIOS baixa o iPXE por TFTP, e ele baixa todo o resto por HTTP. O que ele inicia é um **Alpine Linux** carregado na RAM (~100 MB), que na etapa 5 grava a `noble.raw.gz` na eMMC.
 
 Sequência do boot:
 
@@ -166,107 +179,65 @@ Sequência do boot:
 BIOS (PXE) --TFTP--> ipxe.efi --HTTP--> boot.ipxe --HTTP--> kernel + initramfs do Alpine
 ```
 
-**Procedimento:**
+**Script:**
 
-1. Criar o script embutido no iPXE, `embed.ipxe`. Ele pede um IP e carrega o `boot.ipxe` do servidor (sem ele, o iPXE pediria DHCP, receberia de novo o próprio iPXE e entraria em loop):
-   ```
-   #!ipxe
-   dhcp
-   chain http://<servidor>/boot.ipxe || shell
-   ```
-2. Compilar o iPXE com esse script embutido e copiá-lo para o TFTP:
-   ```
-   sudo apt install git build-essential liblzma-dev
-   git clone https://github.com/ipxe/ipxe.git
-   cd ipxe/src
-   make bin-x86_64-efi/snponly.efi EMBED=/caminho/para/embed.ipxe
-   sudo cp bin-x86_64-efi/snponly.efi /srv/tftp/ipxe.efi
-   ```
-   O `snponly.efi` usa o driver de rede da própria BIOS, o que evita problemas de compatibilidade com a placa de rede.
-3. Baixar os arquivos de netboot do Alpine (versão estável mais recente, pasta `releases/x86_64/netboot/` em `dl-cdn.alpinelinux.org`) para `/srv/http/alpine/`: `vmlinuz-lts`, `initramfs-lts` e `modloop-lts`.
-4. Criar `/srv/http/boot.ipxe`:
-   ```
-   #!ipxe
-   set base http://<servidor>/alpine
-   kernel ${base}/vmlinuz-lts initrd=initramfs-lts ip=dhcp modloop=${base}/modloop-lts alpine_repo=https://dl-cdn.alpinelinux.org/alpine/<versão>/main apkovl=${base}/starlit.apkovl.tar.gz
-   initrd ${base}/initramfs-lts
-   boot
-   ```
-   O `apkovl` é o script que grava a imagem, criado na etapa 5. Como o `boot.ipxe` fica no servidor HTTP, dá para mudar o boot sem recompilar o iPXE.
+```sh
+sudo ipxe/preparar-ipxe.sh
+```
 
-**Teste:** ligar uma placa com monitor. Deve aparecer o iPXE, depois o boot do Alpine, terminando na tela de login do Alpine (enquanto o `apkovl` da etapa 5 não existir).
+1. Compila o iPXE (`snponly.efi`, que usa o driver de rede da própria BIOS) com o script embutido [ipxe/embed.ipxe.tpl](ipxe/embed.ipxe.tpl) e o publica como `/srv/tftp/ipxe.efi`. O script embutido pede um IP e carrega o `boot.ipxe` do servidor; sem ele, o iPXE receberia de novo o próprio iPXE pelo DHCP e entraria em loop. A compilação na UP Board pode levar vários minutos.
+2. Descobre a versão estável do Alpine (`ALPINE_VERSAO=latest-stable` no `config.env`; ou uma versão fixa) e baixa os arquivos de netboot (`vmlinuz-lts`, `initramfs-lts`, `modloop-lts`) para `/srv/http/alpine/`.
+3. Gera `/srv/http/boot.ipxe` a partir de [ipxe/boot.ipxe.tpl](ipxe/boot.ipxe.tpl). Ele inicia o Alpine com o `apkovl` da etapa 5 (o script de gravação). Como o `boot.ipxe` fica no servidor HTTP, dá para mudar o boot sem recompilar o iPXE.
+
+**Teste:** ligar a placa de teste com monitor. Deve aparecer o iPXE, depois o boot do Alpine, terminando na tela de login do Alpine (enquanto o `apkovl` da etapa 5 não existir).
 
 ### 5. Instalação do SO via rede
 
-**Abordagem:** o Alpine iniciado pela rede (etapa 4) roda um script que:
+**Abordagem:** o Alpine iniciado pela rede (etapa 4) roda o script [alpine/starlit.start.tpl](alpine/starlit.start.tpl), que:
 
-1. encontra a eMMC;
-2. verifica se a imagem já está instalada (arquivo `/etc/starlit-release` na partição raiz). Se estiver, **não grava nada**;
-3. se não estiver, baixa a `noble.raw.gz` do servidor e grava direto na eMMC, descomprimindo durante a gravação;
-4. coloca a eMMC em primeiro lugar na ordem de boot e reinicia.
+1. garante que a rede está ativa e o servidor responde;
+2. encontra a eMMC (ignorando pendrives e as áreas internas `mmcblk0boot0`/`boot1`);
+3. verifica se a imagem já está instalada (arquivo `/etc/starlit-release` na partição raiz). Se estiver, **não grava nada**;
+4. se não estiver, baixa a `noble.raw.gz` do servidor e grava direto na eMMC, descomprimindo durante a gravação (com `pipefail`: uma falha no download ou na descompressão interrompe o script, em vez de deixar uma imagem incompleta);
+5. coloca a eMMC em primeiro lugar na ordem de boot (opção "Starlit", partição EFI 15, `\EFI\ubuntu\shimx64.efi`) e reinicia.
 
-A partir daí, a placa sempre inicia pela eMMC e só volta ao boot pela rede se a eMMC falhar. No primeiro boot pela eMMC, o cloud-init busca o `user-data` no servidor e configura a placa.
+As mensagens do script aparecem no monitor. A partir daí, a placa sempre inicia pela eMMC e só volta ao boot pela rede se a eMMC falhar. No primeiro boot pela eMMC, o cloud-init busca o `user-data` no servidor e configura a placa.
 
-**Reinstalar uma placa:** apagar a eMMC (`sudo wipefs -a /dev/mmcblk0` na própria placa) e reiniciar. Sem sistema na eMMC, a BIOS cai no boot pela rede, e a verificação não encontra a marca.
-
-**Script** (`starlit.start`):
-
-```sh
-#!/bin/sh
-SERVIDOR=http://<servidor>
-
-# 1. Encontrar a eMMC (ignora pendrives e partições de boot do eMMC)
-for d in /sys/block/mmcblk*; do
-  [ "$(cat "$d/device/type" 2>/dev/null)" = "MMC" ] && DISCO=/dev/${d##*/}
-done
-[ -z "$DISCO" ] && { echo "eMMC não encontrada"; exit 1; }
-
-# 2. Verificar se a imagem já está instalada
-mkdir -p /mnt/raiz
-if mount -o ro "${DISCO}p1" /mnt/raiz 2>/dev/null; then
-  INSTALADA=$(cat /mnt/raiz/etc/starlit-release 2>/dev/null)
-  umount /mnt/raiz
-fi
-
-# 3. Gravar a imagem, se necessário
-if [ -n "$INSTALADA" ]; then
-  echo "Imagem $INSTALADA já instalada, nada será gravado"
-else
-  echo "Gravando a imagem em $DISCO..."
-  set -o pipefail   # falha se o download ou a descompressão falharem, não só o dd
-  wget -qO- "$SERVIDOR/noble.raw.gz" | gunzip | dd of="$DISCO" bs=4M || exit 1
-  sync
-  partx -u "$DISCO"
-fi
-
-# 4. Colocar a eMMC em primeiro lugar na ordem de boot
-mount -t efivarfs efivarfs /sys/firmware/efi/efivars 2>/dev/null
-for n in $(efibootmgr | grep Starlit | cut -c5-8); do efibootmgr -q -B -b "$n"; done
-efibootmgr -q -c -d "$DISCO" -p 15 -L Starlit -l '\EFI\ubuntu\shimx64.efi'
-
-reboot
-```
-
-A partição 15 é a partição EFI da cloud image do Ubuntu. O `efibootmgr -c` cria a entrada já em primeiro lugar na ordem de boot.
-
-**Empacotar o script para o Alpine** (*apkovl*: um `.tar.gz` com arquivos que o Alpine copia para o `/etc` ao iniciar):
+**Script** (empacota o `starlit.start` como *apkovl*: um `.tar.gz` com arquivos que o Alpine copia para o `/etc` ao iniciar):
 
 ```sh
-mkdir -p ovl/etc/local.d ovl/etc/runlevels/default ovl/etc/apk
-cp starlit.start ovl/etc/local.d/ && chmod +x ovl/etc/local.d/starlit.start
-ln -s /etc/init.d/local ovl/etc/runlevels/default/local   # executa os scripts de /etc/local.d
-touch ovl/etc/.default_boot_services                      # mantém os serviços padrão do Alpine
-printf 'alpine-base\nefibootmgr\nutil-linux\n' > ovl/etc/apk/world   # pacotes extras
-tar -czf /srv/http/alpine/starlit.apkovl.tar.gz --owner=0 --group=0 -C ovl etc
+sudo alpine/empacotar-apkovl.sh
 ```
 
-Os pacotes extras são baixados da internet no boot (pelo `alpine_repo` da etapa 4), então a rede precisa ter acesso à internet.
+O pacote inclui o script, o ativa no boot e pede ao Alpine os pacotes `efibootmgr` e `util-linux`, que são baixados da internet no boot. Por isso, a rede precisa ter acesso à internet.
 
-**Teste:**
+**Reinstalação: sempre manual.** Nenhum script apaga a eMMC de uma placa já instalada; isso é proposital, para que um nó do cluster nunca seja apagado por engano (por exemplo, se a ordem de boot voltar ao padrão). Para reinstalar uma placa, à mão, na própria placa:
 
-1. Ligar uma placa com monitor e acompanhar as mensagens do script. A gravação leva alguns minutos.
-2. Depois do reinício, a placa deve iniciar o Ubuntu pela eMMC e aceitar `ssh <usuário>@<ip da placa>` com a chave configurada na etapa 2.
-3. Forçar o boot pela rede (menu de boot da BIOS) e confirmar que o script exibe "já instalada" e não grava nada.
+1. `sudo wipefs -a -f /dev/mmcblk0` (conferir antes com `lsblk` que a eMMC é a `mmcblk0`);
+2. `sudo reboot`.
+
+Sem sistema na eMMC, a BIOS cai no boot pela rede, a verificação não encontra a marca e a imagem é gravada de novo.
+
+### Validação da Parte 1
+
+Com uma placa só, cada linha dos logs do servidor é dela, o que facilita achar onde algo falhou. Pontos de checagem, na ordem:
+
+1. A placa aparece no log do dnsmasq e baixa o iPXE (etapas 3 e 4).
+2. O Alpine inicia (etapa 4).
+3. O script grava a imagem e reinicia (etapa 5).
+4. A placa inicia pela eMMC, o cloud-init cria o usuário e o acesso funciona: `ssh -i ~/.ssh/cluster-key ubuntu@<ip da placa>` (etapa 2). O IP aparece no `phone-home.log` ou na lista de clientes DHCP do roteador.
+5. O aviso da placa aparece em `/var/log/nginx/phone-home.log` no servidor.
+
+Ainda com essa placa, testar as proteções:
+
+- **Placa já instalada:** forçar o boot pela rede pelo menu de boot da BIOS. O script deve exibir "já instalada" e não gravar nada.
+- **Reinstalação manual:** seguir o procedimento manual da etapa 5 (`wipefs` + `reboot`). A placa deve ser instalada de novo.
+
+---
+
+## Parte 2: três placas
+
+Com a Parte 1 validada, três placas são instaladas ao mesmo tempo, usando o mesmo servidor e os mesmos scripts. Nenhum script novo é necessário: o que muda é o registro das placas (etapa 6) e a validação com várias placas.
 
 ### 6. Registro dos endereços MAC e IP
 
@@ -278,7 +249,7 @@ A tabela de MAC, IP e hostname de cada máquina fica em [inventario.md](inventar
 
 | Máquina | IP | Hostname |
 |---|---|---|
-| Servidor | 192.168.0.10 | `starlit-srv` |
+| Servidor | 192.168.0.160 | `starlit-srv` |
 | Placa NN | 192.168.0.1NN (ex.: placa 01 → 192.168.0.101) | `up-NN` (ex.: `up-01`) |
 
 **Procedimento** (uma placa por vez):
@@ -290,7 +261,7 @@ A tabela de MAC, IP e hostname de cada máquina fica em [inventario.md](inventar
 5. Depois da instalação (etapa 5), reiniciar a placa para que ela pegue o IP reservado.
 6. Definir o hostname:
    ```
-   ssh <usuário>@192.168.0.1NN
+   ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1NN
    sudo hostnamectl set-hostname up-NN
    ```
 
@@ -301,32 +272,17 @@ A tabela de MAC, IP e hostname de cada máquina fica em [inventario.md](inventar
 
 Para saber o MAC de um IP do `phone-home.log`: `ip neigh show <IP>` no servidor.
 
-**Verificação:** `ping 192.168.0.1NN` e `ssh <usuário>@192.168.0.1NN hostname` devem responder com o hostname da tabela. Para conferir todas as placas de uma vez:
+**Verificação:** `ping 192.168.0.1NN` e `ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1NN hostname` devem responder com o hostname da tabela. Para conferir todas as placas de uma vez:
 
 ```sh
-for n in 01 02 03; do ssh <usuário>@192.168.0.1$n hostname; done
+for n in 01 02 03; do ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1$n hostname; done
 ```
 
-### Avaliação inicial (antes da etapa 7)
+### Validação da Parte 2
 
-O objetivo é validar a instalação via PXE com o servidor antes de usar todas as placas. Ela é feita em duas fases.
+Serve para avaliar o que só aparece com mais de uma placa:
 
-**Fase 1: uma placa, com monitor e teclado.** Com uma placa só, cada linha dos logs do servidor é dela, o que facilita achar onde algo falhou. Pontos de checagem, na ordem:
-
-1. A placa aparece no log do dnsmasq e baixa o iPXE (etapas 3 e 4).
-2. O Alpine inicia (etapa 4).
-3. O script grava a imagem e reinicia (etapa 5).
-4. A placa inicia pela eMMC, o cloud-init cria o usuário e o acesso por SSH funciona (etapa 2).
-5. O aviso da placa aparece no `phone-home.log` (etapa 6).
-
-Ainda com essa placa, testar as proteções:
-
-- **Placa já instalada:** forçar o boot pela rede pelo menu de boot da BIOS. O script deve exibir "já instalada" e não gravar nada.
-- **Reinstalação:** apagar a eMMC (`wipefs`) e reiniciar. A placa deve ser instalada de novo.
-
-**Fase 2: três placas ligadas ao mesmo tempo.** Serve para avaliar o que só aparece com mais de uma placa:
-
-- **Instalação simultânea:** medir o tempo de instalação com as três dividindo a banda do servidor e estimar o tempo para as 20.
+- **Instalação simultânea:** ligar as três placas ao mesmo tempo, medir o tempo de instalação com elas dividindo a banda do servidor e estimar o tempo para as 20.
 - **Inventário:** seguir o procedimento da etapa 6 (etiqueta, MAC no log, reserva no roteador, hostname) e comparar os logs do dnsmasq e do `phone_home` com o `inventario.md`.
 - **Situações diferentes:** usar ao menos uma placa ainda com o Ubuntu antigo (o script deve sobrescrevê-lo) e uma com a eMMC já apagada.
 
