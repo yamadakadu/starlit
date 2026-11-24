@@ -307,4 +307,29 @@ Para saber o MAC de um IP do `phone-home.log`: `ip neigh show <IP>` no servidor.
 for n in 01 02 03; do ssh <usuário>@192.168.0.1$n hostname; done
 ```
 
+### Avaliação inicial (antes da etapa 7)
+
+O objetivo é validar a instalação via PXE com o servidor antes de usar todas as placas. Ela é feita em duas fases.
+
+**Fase 1: uma placa, com monitor e teclado.** Com uma placa só, cada linha dos logs do servidor é dela, o que facilita achar onde algo falhou. Pontos de checagem, na ordem:
+
+1. A placa aparece no log do dnsmasq e baixa o iPXE (etapas 3 e 4).
+2. O Alpine inicia (etapa 4).
+3. O script grava a imagem e reinicia (etapa 5).
+4. A placa inicia pela eMMC, o cloud-init cria o usuário e o acesso por SSH funciona (etapa 2).
+5. O aviso da placa aparece no `phone-home.log` (etapa 6).
+
+Ainda com essa placa, testar as proteções:
+
+- **Placa já instalada:** forçar o boot pela rede pelo menu de boot da BIOS. O script deve exibir "já instalada" e não gravar nada.
+- **Reinstalação:** apagar a eMMC (`wipefs`) e reiniciar. A placa deve ser instalada de novo.
+
+**Fase 2: três placas ligadas ao mesmo tempo.** Serve para avaliar o que só aparece com mais de uma placa:
+
+- **Instalação simultânea:** medir o tempo de instalação com as três dividindo a banda do servidor e estimar o tempo para as 20.
+- **Inventário:** seguir o procedimento da etapa 6 (etiqueta, MAC no log, reserva no roteador, hostname) e comparar os logs do dnsmasq e do `phone_home` com o `inventario.md`.
+- **Situações diferentes:** usar ao menos uma placa ainda com o Ubuntu antigo (o script deve sobrescrevê-lo) e uma com a eMMC já apagada.
+
+As três placas podem seguir para a etapa 7 como cluster de teste (um nó de controle e dois de trabalho) antes da instalação das demais.
+
 ### 7. Preparação do cluster
