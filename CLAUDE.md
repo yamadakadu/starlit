@@ -11,7 +11,7 @@ The plan and the scripts for provisioning a bare-metal Kubernetes cluster of abo
   - Parte 2 (step 6 + validation + step 7): three boards. Step 7 (cluster) is still empty.
 - `especificacoes.md`: hardware specs.
 - `inventario.md`: MAC / IP / hostname table of every machine.
-- `config.env`: the only place for values (server IP, interface, user, SSH key, versions).
+- `config.env`: the only place for values (server IP, interface, user, SSH key, versions). It is gitignored (it depends on each installation's network); `config.env.example` is the committed template, and `lib.sh` stops if `config.env` is missing or `SERVIDOR_IP`, `INTERFACE` or `REDE` is empty.
 - `lib.sh`: shared helpers. `renderizar` fills `*.tpl` with envsubst, replacing **only the listed variables**, so `${base}` (iPXE), `$uri` (nginx) and shell variables in templates survive.
 - One folder per step, each with one script: `imagem/` (2), `servidor/` (3), `ipxe/` (4), `alpine/` (5).
 
@@ -35,9 +35,9 @@ BIOS PXE (IPv4 only) --TFTP--> ipxe.efi --HTTP--> boot.ipxe --HTTP--> Alpine (in
   -> Ubuntu 24.04 cloud image boots from the eMMC; cloud-init (NoCloud, seedfrom http://<server>/cloud-init/) configures it and calls phone_home
 ```
 
-The server is an UP Board with Ubuntu Server 24.04, installed manually from USB, at `192.168.0.160`, which it gets from the router's DHCP. This IP is baked into the iPXE binary and the image, so it must not change: reserve it on the router, or else use a static IP outside the DHCP pool. The user may later move the server to another machine and will say so.
+The server is an UP Board with Ubuntu Server 24.04, installed over the network from the laptop, currently at `192.168.0.110` (static IP via `/etc/netplan/99-starlit.yaml`). The server's IP and MAC are not fixed by the project (any machine, any IP of the private network, set in `SERVIDOR_IP`); the docs must not present them as fixed. The IP is baked into the iPXE binary and the image, so it must not change: reserve it on the router, or else use a static IP outside the DHCP pool. The user may later move the server to another machine and will say so.
 
-**Currently**, the user's laptop (Ubuntu 24.04, `enp3s0`, `192.168.0.216`) is a temporary server used to install the server board over the network, so the local `config.env` has `SERVIDOR_IP=192.168.0.216` and `INTERFACE=enp3s0`. Don't commit those values. Handing over to the board means: disable dnsmasq and nginx on the laptop (two proxy-DHCP servers would answer the boards), set `config.env` back to `.160` and the board's interface, and rerun all five scripts on the board. Step 3 of the README still describes the USB install; it will be rewritten once the handover has worked.
+**Currently**, the user's laptop (Ubuntu 24.04, `enp3s0`, `192.168.0.216`) is a temporary server used to install the server board over the network, so the laptop's local `config.env` has `SERVIDOR_IP=192.168.0.216` and `INTERFACE=enp3s0`. Handing over to the board means: disable dnsmasq and nginx on the laptop (two proxy-DHCP servers would answer the boards), create the board's `config.env` with its stable IP and interface, and rerun all five scripts on the board. Step 3 of the README still describes the USB install; it will be rewritten once the handover has worked.
 
 Decisions already made with the user, and why. Don't revisit them without a reason:
 
@@ -60,7 +60,7 @@ Decisions already made with the user, and why. Don't revisit them without a reas
 
   Hostnames are set manually in step 6. Ansible was suggested for step 7 but not decided.
 - **No diskless/NFS root:** the server would be a single point of failure, containerd's overlayfs doesn't work on NFS, and etcd suffers on network storage.
-- **IPs by MAC reservation on the router** (whether the router supports this is still unconfirmed). Convention: server `.160` / `starlit-srv`, board NN `192.168.0.1NN` / `up-NN`.
+- **IPs by MAC reservation on the router** (whether the router supports this is still unconfirmed). Convention: server `starlit-srv` (IP from `config.env`, `.110` in this installation), board NN `192.168.0.2NN` / `up-NN`. The board range must stay outside the router's DHCP pool and clear of other machines (the laptop's `.216` collides with board 16).
 
 ## Network
 

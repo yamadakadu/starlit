@@ -8,7 +8,7 @@ Cores: azul = roda no servidor; verde = roda na placa; amarelo = passo manual; b
 flowchart TB
     subgraph S1["1 · No servidor: uma vez, como root (sudo), na ordem"]
         direction LR
-        A0["<b>Preparar o servidor (à mão)</b><br/>Ubuntu 24.04, IP .160 fixo<br/>clonar/copiar o repositório + cluster-key.pub<br/>config.env: IP, INTERFACE<br/>(hoje: notebook .216, temporário)"]
+        A0["<b>Preparar o servidor (à mão)</b><br/>Ubuntu 24.04, IP que não muda<br/>clonar/copiar o repositório + cluster-key.pub<br/>config.env (de config.env.example): IP, INTERFACE, REDE<br/>(hoje: notebook .216, temporário)"]
         A3["<b>Etapa 3</b><br/>servidor/configurar-servidor.sh<br/>dnsmasq: proxy DHCP + TFTP<br/>nginx: HTTP em /srv/http"]
         A2["<b>Etapa 2</b><br/>imagem/preparar-imagem.sh<br/>cloud image + kernel generic<br/>→ noble.raw.gz (~1,7 GB)<br/>publicar-cloud-init.sh → user-data, meta-data"]
         A4["<b>Etapa 4</b><br/>ipxe/preparar-ipxe.sh<br/>compila ipxe.efi (snponly)<br/>baixa o Alpine, gera boot.ipxe"]

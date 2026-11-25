@@ -37,7 +37,9 @@ O trabalho está dividido em duas partes:
 
 Diagrama do processo inteiro, da preparação do servidor à etapa 7: [arquitetura.md](arquitetura.md).
 
-Os scripts rodam **no servidor** (por enquanto, uma das UP Boards), com `sudo`, e leem as configurações de [config.env](config.env) (IP do servidor, interface de rede, usuário, chave SSH, versões).
+Passo a passo prático, do reset da rede ao acesso às placas, com os logs para depuração: [TUTORIAL.md](TUTORIAL.md).
+
+Os scripts rodam **no servidor** (por enquanto, uma das UP Boards), com `sudo`, e leem as configurações do `config.env` (IP do servidor, interface de rede, usuário, chave SSH, versões). Esse arquivo não vai para o git, porque depende da rede de cada instalação: ele é criado a partir do modelo [config.env.example](config.env.example) (etapa 3).
 
 | Pasta | Etapa | Script | O que faz |
 |---|---|---|---|
@@ -137,7 +139,7 @@ A cloud image não tem swap (exigência do Kubernetes) e a partição raiz cresc
 
 ### 3. Preparação da máquina com dnsmasq e servidor http
 
-**Abordagem:** uma das UP Boards é o servidor, com IP `192.168.0.160` (recebido pelo DHCP do roteador), e roda três serviços:
+**Abordagem:** uma das UP Boards é o servidor e roda três serviços. O IP e o MAC do servidor não são fixos no projeto: pode ser qualquer máquina com Ubuntu, em qualquer IP da rede privada, desde que esse IP não mude depois (ver abaixo). O IP escolhido vai no `SERVIDOR_IP` do `config.env`.
 
 | Serviço | Função | Porta |
 |---|---|---|
@@ -147,16 +149,24 @@ A cloud image não tem swap (exigência do Kubernetes) e a partição raiz cresc
 
 **Instalação do servidor** (à mão, uma vez):
 
-1. Instalar o **Ubuntu Server 24.04** na placa por pendrive (ISO oficial gravada no pendrive). Na tela de rede do instalador, deixar a configuração automática (DHCP): o roteador atribui `192.168.0.160`. Criar o usuário `ubuntu` e marcar a instalação do OpenSSH.
+1. Instalar o **Ubuntu Server 24.04** na placa por pendrive (ISO oficial gravada no pendrive). Na tela de rede do instalador, deixar a configuração automática (DHCP). Criar o usuário `ubuntu` e marcar a instalação do OpenSSH.
 
-   **O IP do servidor não pode mudar:** ele fica gravado no iPXE (etapa 4) e na imagem das placas (etapa 2). Se o roteador entregar outro IP ao servidor, as placas deixam de encontrá-lo, e seria preciso ajustar o `config.env` e rodar os scripts de novo. Por isso, reservar `192.168.0.160` para o MAC do servidor no roteador (mesmo procedimento da etapa 6). *Confirmar se o roteador permite a reserva; se não permitir, configurar um IP fixo no servidor, fora da faixa de DHCP do roteador.*
+   **O IP do servidor não pode mudar:** ele fica gravado no iPXE (etapa 4) e na imagem das placas (etapa 2). Se o roteador entregar outro IP ao servidor, as placas deixam de encontrá-lo, e seria preciso ajustar o `config.env` e rodar os scripts de novo. Por isso, escolher um IP para o servidor e garanti-lo de um destes jeitos:
+   - reserva no roteador para o MAC do servidor (mesmo procedimento da etapa 6). *Confirmar se o roteador permite a reserva;*
+   - IP fixo no próprio servidor (netplan), fora da faixa de DHCP do roteador.
 2. Na BIOS dessa placa, deixar a eMMC em primeiro lugar na ordem de boot.
 3. Copiar o repositório e a chave pública para o servidor, a partir do computador onde eles estão:
    ```sh
-   scp -r starlit ubuntu@192.168.0.160:
-   scp ~/.ssh/cluster-key.pub ubuntu@192.168.0.160:.ssh/
+   scp -r starlit ubuntu@<IP do servidor>:
+   scp ~/.ssh/cluster-key.pub ubuntu@<IP do servidor>:.ssh/
    ```
-4. No servidor, conferir o nome da interface de rede (`ip -br link`) e ajustar `INTERFACE` no `config.env`.
+4. No servidor, criar o `config.env` a partir do modelo e preencher `SERVIDOR_IP`, `INTERFACE` (nome visto em `ip -br link`) e `REDE` (endereço da rede, ex.: `192.168.0.0`):
+   ```sh
+   cd ~/starlit
+   cp config.env.example config.env
+   nano config.env
+   ```
+   Os scripts param com erro se o `config.env` não existir ou se um desses três campos estiver vazio.
 
 **Script:**
 
@@ -165,12 +175,12 @@ cd ~/starlit
 sudo servidor/configurar-servidor.sh
 ```
 
-Ele confere que a interface tem o IP `192.168.0.160`, instala o dnsmasq e o nginx, gera as configurações a partir de [servidor/dnsmasq-pxe.conf.tpl](servidor/dnsmasq-pxe.conf.tpl) e [servidor/nginx-starlit.conf.tpl](servidor/nginx-starlit.conf.tpl), cria `/srv/tftp/` e `/srv/http/`, libera as portas no firewall (se o `ufw` estiver ativo) e reinicia os serviços. O DNS do dnsmasq fica desligado (`port=0`), para não conflitar com o `systemd-resolved`.
+Ele confere que a interface tem o IP do `SERVIDOR_IP`, instala o dnsmasq e o nginx, gera as configurações a partir de [servidor/dnsmasq-pxe.conf.tpl](servidor/dnsmasq-pxe.conf.tpl) e [servidor/nginx-starlit.conf.tpl](servidor/nginx-starlit.conf.tpl), cria `/srv/tftp/` e `/srv/http/`, libera as portas no firewall (se o `ufw` estiver ativo) e reinicia os serviços. O DNS do dnsmasq fica desligado (`port=0`), para não conflitar com o `systemd-resolved`.
 
 **Teste:**
 
-- HTTP: `curl http://192.168.0.160/` a partir de outra máquina deve listar os arquivos publicados.
-- Boot: acompanhar `journalctl -u dnsmasq -f` e ligar a placa de teste. Devem aparecer a requisição PXE (com o MAC da placa) e o envio do bootloader por TFTP.
+- HTTP: `curl http://<IP do servidor>/` a partir de outra máquina deve listar os arquivos publicados.
+- Boot: acompanhar `sudo journalctl -u dnsmasq -f` e ligar a placa de teste. Devem aparecer a requisição PXE (com o MAC da placa) e o envio do bootloader por TFTP.
 
 ### 4. Preparação do bootloader
 
@@ -275,33 +285,35 @@ A tabela de MAC, IP e hostname de cada máquina fica em [inventario.md](inventar
 
 | Máquina | IP | Hostname |
 |---|---|---|
-| Servidor | 192.168.0.160 | `starlit-srv` |
-| Placa NN | 192.168.0.1NN (ex.: placa 01 → 192.168.0.101) | `up-NN` (ex.: `up-01`) |
+| Servidor | o `SERVIDOR_IP` do `config.env` (nesta instalação, 192.168.0.110), fora da faixa das placas | `starlit-srv` |
+| Placa NN | 192.168.0.2NN (ex.: placa 01 → 192.168.0.201) | `up-NN` (ex.: `up-01`) |
+
+A faixa das placas (`.201` em diante) deve ficar fora da faixa de DHCP automático do roteador e não pode coincidir com o IP de outra máquina (servidor, notebook). *Confirmar se o roteador aceita reserva fora da faixa de DHCP.*
 
 **Procedimento** (uma placa por vez):
 
 1. Colar uma etiqueta com o número na placa (01, 02, ...), para saber qual placa física corresponde a cada linha do inventário.
-2. Descobrir o MAC: acompanhar `journalctl -u dnsmasq -f` no servidor e ligar **só essa placa**. O MAC aparece na requisição PXE. Com a placa já instalada, dá para ver também por `ip link` na própria placa ou na lista de clientes DHCP do roteador.
+2. Descobrir o MAC: acompanhar `sudo journalctl -u dnsmasq -f` no servidor e ligar **só essa placa**. O MAC aparece na requisição PXE. Com a placa já instalada, dá para ver também por `ip link` na própria placa ou na lista de clientes DHCP do roteador.
 3. Anotar no `inventario.md` o número, o MAC, o IP e o hostname da placa.
 4. Criar a reserva no roteador (interface web em 192.168.0.1, menu do servidor DHCP, opção de reserva de endereço): MAC → IP. *Confirmar no roteador o nome exato do menu.*
 5. Depois da instalação (etapa 5), reiniciar a placa para que ela pegue o IP reservado.
 6. Definir o hostname:
    ```
-   ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1NN
+   ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.2NN
    sudo hostnamectl set-hostname up-NN
    ```
 
 **Acompanhamento da instalação:** comparar dois logs do servidor com o `inventario.md`:
 
-- `journalctl -u dnsmasq | grep PXE`: placas que **pediram boot pela rede** (por MAC). Uma placa que não aparece aqui não iniciou pela rede (conferir BIOS e cabo).
+- `sudo journalctl -u dnsmasq | grep PXE`: placas que **pediram boot pela rede** (por MAC). Uma placa que não aparece aqui não iniciou pela rede (conferir BIOS e cabo).
 - `cat /var/log/nginx/phone-home.log`: placas que **terminaram a instalação** (por IP). Uma placa que pediu boot mas não aparece aqui travou na gravação ou no primeiro boot (conferir pelo monitor).
 
 Para saber o MAC de um IP do `phone-home.log`: `ip neigh show <IP>` no servidor.
 
-**Verificação:** `ping 192.168.0.1NN` e `ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1NN hostname` devem responder com o hostname da tabela. Para conferir todas as placas de uma vez:
+**Verificação:** `ping 192.168.0.2NN` e `ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.2NN hostname` devem responder com o hostname da tabela. Para conferir todas as placas de uma vez:
 
 ```sh
-for n in 01 02 03; do ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.1$n hostname; done
+for n in 01 02 03; do ssh -i ~/.ssh/cluster-key ubuntu@192.168.0.2$n hostname; done
 ```
 
 ### Validação da Parte 2

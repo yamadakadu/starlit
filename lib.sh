@@ -3,11 +3,17 @@
 
 set -euo pipefail
 
-# shellcheck source=config.env
-source "$RAIZ/config.env"
-
 msg()  { printf '\n==> %s\n' "$*"; }
 erro() { printf 'ERRO: %s\n' "$*" >&2; exit 1; }
+
+[ -f "$RAIZ/config.env" ] \
+  || erro "config.env não encontrado: cp config.env.example config.env e preencher (README, etapa 3)"
+# shellcheck source=config.env.example
+source "$RAIZ/config.env"
+for v in SERVIDOR_IP INTERFACE REDE; do
+  [ -n "${!v:-}" ] || erro "$v vazio no config.env"
+done
+unset v
 
 exigir_root() {
   [ "$(id -u)" -eq 0 ] || erro "rode com sudo: sudo $0"
