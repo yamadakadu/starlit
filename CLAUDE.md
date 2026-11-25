@@ -21,9 +21,11 @@ The scripts run **on the server board**, as root via `sudo`. They can't run on t
 for f in lib.sh */*.sh; do bash -n "$f"; done
 ```
 
-To check `alpine/starlit.start.tpl` (busybox ash on the boards): render it with `renderizar` (`RAIZ=$PWD; source lib.sh`), then run `busybox ash -n` on the result.
+To check `alpine/starlit.start.tpl` (busybox ash on the boards): render it with `renderizar` (`RAIZ=$PWD; source lib.sh`), then run `busybox ash -n` on the result. The Alpine tools are BusyBox: check options against `busybox <cmd> --help` (e.g. `wget` has `--spider` but no `-s`). The base Alpine has no `wipefs` (`apk add wipefs`), and its `fdisk` can't write GPT.
 
-Nothing has been tested on the boards yet, except removing the old Ubuntu through GRUB `init=/bin/bash` (step 1).
+What has been tested on the boards:
+- removing the old Ubuntu through GRUB `init=/bin/bash` (step 1);
+- the full PXE chain (steps 3 to 5) installing the server board, with the user's laptop as temporary server. The first image didn't boot (no eMMC driver, see below). The fixed image was being written at the time of writing; its first boot and cloud-init are not confirmed yet.
 
 ## Provisioning architecture
 
@@ -35,18 +37,22 @@ BIOS PXE (IPv4 only) --TFTP--> ipxe.efi --HTTP--> boot.ipxe --HTTP--> Alpine (in
 
 The server is an UP Board with Ubuntu Server 24.04, installed manually from USB, at `192.168.0.160`, which it gets from the router's DHCP. This IP is baked into the iPXE binary and the image, so it must not change: reserve it on the router, or else use a static IP outside the DHCP pool. The user may later move the server to another machine and will say so.
 
+**Currently**, the user's laptop (Ubuntu 24.04, `enp3s0`, `192.168.0.216`) is a temporary server used to install the server board over the network, so the local `config.env` has `SERVIDOR_IP=192.168.0.216` and `INTERFACE=enp3s0`. Don't commit those values. Handing over to the board means: disable dnsmasq and nginx on the laptop (two proxy-DHCP servers would answer the boards), set `config.env` back to `.160` and the board's interface, and rerun all five scripts on the board. Step 3 of the README still describes the USB install; it will be rewritten once the handover has worked.
+
 Decisions already made with the user, and why. Don't revisit them without a reason:
 
 - **Ubuntu cloud image written to the eMMC, not the ISO installer:** netbooting the ISO loads ~3 GB into 4 GB of RAM. `imagem/preparar-imagem.sh`:
   - checks that partition 15 is the ESP and contains `EFI/ubuntu/shimx64.efi` (`starlit.start` depends on it);
+  - grows partition 1 by 2 GB, then installs `linux-image-generic` in a chroot. The cloud image's *virtual* kernel lacks the eMMC modules (`linux-modules-extra`): the board loads the kernel through UEFI, but the initramfs never finds the root. The user chose `linux-image-generic` over only `linux-modules-extra-<version>` so that kernel updates keep the driver; the cost is the firmware, and `noble.raw.gz` went from ~0.5 to ~1.7 GB (accepted);
+  - swaps the console to `console=ttyS0 console=tty1`, so boot messages show on HDMI;
   - adds a NoCloud config and the marker file `/etc/starlit-release`;
-  - gzips the image.
+  - runs `fstrim` and gzips the image.
 - **Router keeps DHCP; dnsmasq runs in proxy-DHCP mode** and also serves TFTP. nginx serves `/srv/http`, and its `/phone-home/` location returns 200.
 - **iPXE `snponly.efi` built with an embedded script**, so iPXE doesn't receive itself again over DHCP and loop. Secure Boot must be off. The Alpine version is resolved from `latest-stable` and pinned in `boot.ipxe`.
 - **Reinstall protection:**
   - `starlit.start` never writes if the marker file exists;
   - `starlit.start` puts the eMMC first in the boot order.
-  - **Reinstalling is always manual** (`wipefs -a -f /dev/mmcblk0`). No script may wipe an installed board.
+  - **Reinstalling is always manual** (`wipefs -a -f /dev/mmcblk0`). No script may wipe an installed board. A board that is installed but doesn't boot is wiped from Alpine started without the apkovl (README, step 5).
 - **UEFI fallback:** the board's UEFI still boots any `\EFI\BOOT\BOOTX64.EFI` on the eMMC even with that entry disabled, so a leftover OS must be wiped, not just disabled. An empty board whose PXE fails stops at the BIOS screen.
 - **cloud-init only does the first boot:**
   - user `ubuntu`, key `~/.ssh/cluster-key.pub`, passwordless sudo;

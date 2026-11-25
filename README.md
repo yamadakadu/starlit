@@ -35,6 +35,8 @@ O trabalho está dividido em duas partes:
 
 ## Estrutura do repositório
 
+Diagrama do processo inteiro, da preparação do servidor à etapa 7: [arquitetura.md](arquitetura.md).
+
 Os scripts rodam **no servidor** (por enquanto, uma das UP Boards), com `sudo`, e leem as configurações de [config.env](config.env) (IP do servidor, interface de rede, usuário, chave SSH, versões).
 
 | Pasta | Etapa | Script | O que faz |
@@ -115,10 +117,11 @@ sudo imagem/publicar-cloud-init.sh  # user-data e meta-data
 O que o `preparar-imagem.sh` faz (arquivos intermediários em `/var/tmp/starlit/`):
 
 1. Baixa `noble-server-cloudimg-amd64.img` e confere o SHA256 com o `SHA256SUMS` publicado junto.
-2. Converte de qcow2 para raw, o formato que pode ser gravado direto no disco.
+2. Converte de qcow2 para raw, o formato que pode ser gravado direto no disco, e aumenta a partição raiz em 2 GB: a cloud image vem com só ~800 MB livres, pouco para o passo 4.
 3. Confere que a partição 15 é a partição EFI e tem o `EFI/ubuntu/shimx64.efi` (o script da etapa 5 depende disso).
-4. Na partição raiz (1), cria `/etc/cloud/cloud.cfg.d/99-starlit-nocloud.cfg`, que aponta o cloud-init para `http://<servidor>/cloud-init/`, e o arquivo de marca `/etc/starlit-release` com a versão da imagem (`IMAGEM_VERSAO` no `config.env`). A etapa 5 usa a marca para saber se a imagem já está instalada.
-5. Comprime com gzip e publica `noble.raw.gz` no servidor HTTP. A maior parte dos ~3,5 GB da imagem é espaço vazio, então o arquivo comprimido fica bem menor; a descompressão é feita na própria placa, durante a gravação.
+4. Troca o kernel. A cloud image vem com o kernel *virtual*, feito para máquinas virtuais, que não tem o driver da eMMC (pacote `linux-modules-extra`). Com ele, a placa carrega o kernel pela UEFI, mas o Linux não encontra a partição raiz e o boot trava. O script instala na imagem (com `chroot`) o `linux-image-generic`, que traz o driver também nas atualizações de kernel futuras, e regera o initramfs e o GRUB. Também inverte a ordem do console para `console=ttyS0 console=tty1`, para as mensagens do boot aparecerem no monitor, e não na porta serial.
+5. Na partição raiz (1), cria `/etc/cloud/cloud.cfg.d/99-starlit-nocloud.cfg`, que aponta o cloud-init para `http://<servidor>/cloud-init/`, e o arquivo de marca `/etc/starlit-release` com a versão da imagem (`IMAGEM_VERSAO` no `config.env`). A etapa 5 usa a marca para saber se a imagem já está instalada.
+6. Zera os blocos livres (`fstrim`), comprime com gzip e publica `noble.raw.gz` no servidor HTTP. A imagem tem ~5,5 GB, dos quais ~3,3 GB ocupados; comprimida, fica com ~1,7 GB, porque o firmware e os módulos do kernel genérico já vêm comprimidos e quase não diminuem. A descompressão é feita na própria placa, durante a gravação.
 
 **Arquivos do cloud-init** (servidos em `http://<servidor>/cloud-init/`). O modelo é [imagem/user-data.tpl](imagem/user-data.tpl); para mudar a configuração, editar o modelo e rodar de novo o `publicar-cloud-init.sh`, sem regerar a imagem.
 
@@ -203,6 +206,8 @@ sudo ipxe/preparar-ipxe.sh
 
 As mensagens do script aparecem no monitor. A partir daí, a placa sempre inicia pela eMMC e só volta ao boot pela rede se a eMMC falhar. No primeiro boot pela eMMC, o cloud-init busca o `user-data` no servidor e configura a placa.
 
+**Não desligar nem reiniciar a placa durante a gravação.** O começo da imagem é gravado primeiro, então a marca `/etc/starlit-release` pode já estar na eMMC antes de a gravação terminar. Nesse caso, o script considera a placa instalada e não grava de novo, mas a placa não inicia. Para recuperar, seguir a reinstalação de uma placa que não inicia (abaixo).
+
 **Script** (empacota o `starlit.start` como *apkovl*: um `.tar.gz` com arquivos que o Alpine copia para o `/etc` ao iniciar):
 
 ```sh
@@ -217,6 +222,27 @@ O pacote inclui o script, o ativa no boot e pede ao Alpine os pacotes `efibootmg
 2. `sudo reboot`.
 
 Sem sistema na eMMC, a BIOS cai no boot pela rede, a verificação não encontra a marca e a imagem é gravada de novo.
+
+**Reinstalação de uma placa que não inicia** (imagem com defeito ou gravação interrompida). O Ubuntu da eMMC não chega a um terminal, e o boot pela rede também não serve: o script do Alpine encontra a marca, diz "já instalada" e reinicia. O caminho é iniciar o Alpine **sem** o script:
+
+1. No servidor, desativar o pacote do script:
+   ```sh
+   sudo mv /srv/http/alpine/starlit.apkovl.tar.gz /srv/http/alpine/starlit.apkovl.tar.gz.off
+   ```
+2. Na placa, escolher o boot por IPv4 no menu de boot da BIOS (tecla a confirmar; nas UP Boards costuma ser F7) ou pelo *Boot Override* da BIOS. Sem o pacote, o Alpine inicia e para na tela de login.
+3. Entrar como `root` (sem senha). O Alpine básico não traz o `wipefs`, que é instalado da internet:
+   ```sh
+   apk add wipefs
+   lsblk                       # conferir que a eMMC é a mmcblk0
+   wipefs -a -f /dev/mmcblk0
+   ```
+4. No servidor, reativar o pacote **antes** de reiniciar a placa:
+   ```sh
+   sudo mv /srv/http/alpine/starlit.apkovl.tar.gz.off /srv/http/alpine/starlit.apkovl.tar.gz
+   ```
+5. Na placa: `reboot`. Com a eMMC vazia, ela cai no boot pela rede e a imagem é gravada de novo.
+
+Enquanto o pacote estiver desativado, nenhuma outra placa é instalada pela rede.
 
 ### Validação da Parte 1
 

@@ -10,7 +10,7 @@ echo "=== Starlit: instalação via rede ==="
 
 # 0. Garantir a rede (normalmente já vem configurada do boot)
 i=0
-until wget -q -s "$SERVIDOR/boot.ipxe"; do
+until wget -q --spider "$SERVIDOR/boot.ipxe"; do
   i=$((i + 1))
   [ "$i" -gt 10 ] && { echo "ERRO: servidor $SERVIDOR inacessível"; exit 1; }
   for n in /sys/class/net/*; do
