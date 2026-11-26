@@ -1,0 +1,46 @@
+# Configuração (`config.env`)
+
+Os scripts leem todos os valores do `config.env`: IP do servidor, interface de rede, usuário, chave SSH, versões e pastas. Esse arquivo não vai para o git, porque depende da rede de cada instalação; ele é criado a partir do modelo `config.env.example`:
+
+```sh
+cd ~/starlit
+cp config.env.example config.env
+nano config.env
+```
+
+Os scripts param com erro se o `config.env` não existir ou se `SERVIDOR_IP`, `INTERFACE` ou `REDE` estiverem vazios. Ver também a [seção 4.2 do tutorial](../tutorial/4-repositorio.md).
+
+## Modelo
+
+```sh title="config.env.example"
+# Configuração comum a todos os scripts do projeto.
+# Modelo: copie para config.env (cp config.env.example config.env) e preencha com os
+# valores da sua rede. O config.env não vai para o git, pois depende de cada instalação.
+# Os scripts rodam no servidor e leem o config.env.
+
+# Servidor (dnsmasq + nginx)
+# IP do servidor na rede privada. Fica gravado no iPXE, no boot.ipxe, na imagem e no
+# apkovl, então não pode mudar depois: usar uma reserva por MAC no roteador ou um IP
+# fixo fora da faixa de DHCP. Se mudar, ajustar aqui e rodar todos os scripts de novo.
+SERVIDOR_IP=                # ex.: 192.168.0.160
+INTERFACE=                  # interface de rede do servidor, ver `ip -br link`; ex.: enp1s0
+REDE=                       # endereço da rede onde o dnsmasq responde em modo proxy DHCP; ex.: 192.168.0.0
+
+# Usuário criado pelo cloud-init nas placas
+USUARIO=ubuntu
+# Chave pública do usuário que roda o script (funciona também com sudo)
+SSH_PUBKEY_FILE="$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)/.ssh/cluster-key.pub"
+
+# Imagem do Ubuntu (etapa 2)
+UBUNTU_BASE_URL=https://cloud-images.ubuntu.com/noble/current
+UBUNTU_IMG=noble-server-cloudimg-amd64.img
+IMAGEM_VERSAO=noble-1       # gravada em /etc/starlit-release; trocar ao gerar uma imagem nova
+
+# Alpine usado para gravar a imagem (etapas 4 e 5): "latest-stable" ou uma versão fixa, ex.: v3.22
+ALPINE_VERSAO=latest-stable
+
+# Pastas servidas
+TFTP_DIR=/srv/tftp
+HTTP_DIR=/srv/http
+WORK_DIR=/var/tmp/starlit   # arquivos intermediários (imagem, compilação do iPXE)
+```
